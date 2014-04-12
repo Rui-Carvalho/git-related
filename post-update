@@ -1,0 +1,153 @@
+#!/bin/bash
+#=============================================================
+#         FILE: <the_git_repo.git>/hooks/post-update
+#        USAGE: "git push" to the master branch (considering it is a tracking branch, if not specify <origin>)
+#  DESCRIPTION: Executes Post Update actions after git push to the repo's master branch in order
+#               to synchronize the production web site with the changes pushed to the master branch (production).
+#               This script is called automatically by git engine as a hook to a post update action.
+#               The first argument that git invokes this script with is "refs/heads/<branch>" where
+#               "<branch>" is the name of the branch that was pushed/updated.
+#      OPTIONS: ---
+# REQUIREMENTS: Needs a git push action to be triggered by git as a hook.
+#         BUGS: ---
+#        NOTES: The script connects via ssh to a remote machine to update the production code. It should run
+#               from a staging server and a SSH RSA key without password should be set to authorize the user
+#               that the script runs under in order for the connection to be established. The same user should 
+#               exist on the production server.
+#       AUTHOR: Rui Carvalho @ www.rctalkit.com
+#      Licence: Distributed by Rui Carvalho under the MIT Licence. Use the script at your will, but
+#               please reference my name as a 'donation', by leaving intact the "BASED ON" entry below. Thanks.
+#      COMPANY: www.rctalkit.com
+#      VERSION: 1.0
+#     BASED ON: Rui Carvalho's POST-UPDATE script @ www.rctalkit.com & https://github.com/Rui-Carvalho/git-related
+#      CREATED: 10.04.2014
+#     REVISION: 12.04.2014
+#=============================================================
+
+# ----------------------------------
+# 1) Define Script variables
+# ----------------------------------
+PROD_BRANCH="refs/heads/master"
+SSH_KEY_FILE="/home/<user>/your_id_rsa_wout_phrase_file"
+SSH_USER="<user>"
+TARGET_SERVER="yourserver.com"
+SYNC_SOURCE_DIR="/var/www/html/<yoursite>/" # On staging machine
+SYNC_TARGET_DIR="/var/www/html/<yoursite>/" # On production machine
+BACKUP_DIRPATH="/var/www/BACKUPS_FOLDER/"
+ZIP_FILE="yoursite_b4_Update.zip"
+ZIPPED_DIR="/var/www/html/<yoursite>"
+GIT_EXCLUDES=(".git*","wp-content/uploads")
+
+# Set the colors for the output formating in the shell.
+# For guides on coloring the BASH check: 
+#   1) http://tldp.org/HOWTO/Bash-Prompt-HOWTO/x329.html
+#   2) http://tldp.org/LDP/abs/html/colorizing.html
+#   3) http://webhome.csc.uvic.ca/~sae/seng265/fall04/tips/s265s047-tips/bash-using-colors.html
+# The simplest, and perhaps most useful ANSI escape sequence is bold text, \033[1m ... \033[0m. The \033 represents an escape, the "[1" turns on the bold attribute, while the "[0" switches it off. The "m" terminates each term of the escape sequence.
+# bash$ echo -e "\033[1mThis is bold text.\033[0m"	      
+# A similar escape sequence switches on the underline attribute (on an rxvt and an aterm).
+# bash$ echo -e "\033[4mThis is underlined text.\033[0m"
+RED='\033[0;41;30m'
+YLW='\033[1;33m'
+GRN='\033[1;32m'
+STD='\033[0;0;39m'
+
+# ----------------------------------
+# 2) Script Running Core
+# ----------------------------------
+
+# Only proceed if we are on the master branch (production one)
+if [ "$PROD_BRANCH" != "$1" ]; then
+    echo "Branch updated was NOT ${PROD_BRANCH} but: $1" #(uncomment to write to file) > '/var/www/html/test/output.txt'
+    exit
+fi
+
+# Proceed => We are on the master Branch => Let's do the works!
+echo "####################################################################"
+echo "      "
+echo "Branch updated was ${PROD_BRANCH}" #(uncomment to write to file) > '/var/www/html/test/output.txt'
+echo "      "
+
+# -(1)- Make a backup copy of production for safety - overwrites previous backup - we only keep last backup!
+backup_of_production
+
+# -(2)- Export repo/master to web server's public directory - 
+export_to_production
+
+#  -(3)- Sets permissions appropriately
+set_permissions
+
+#  -(4)- Deployment Tasks: Run Puppet Apply, Restart Daemons, etc
+run_deployment_tasks
+
+echo "####################################################################"
+
+
+
+# ----------------------------------
+# 3) User defined functions
+# ----------------------------------
+
+    #=== FUNCTION ================================================================
+    #        NAME: backup_of_production
+    # DESCRIPTION: Make a backup copy of production for safety - overwrites previous backup - we only keep last backup!
+    #  PARAMETERS: ---
+    #===============================================================================
+    function backup_of_production {
+        echo " >>>> Starting ZIP backup of target Directory: ${ZIPPED_DIR}"
+        echo "      Producing file @ ${TARGET_SERVER}:${BACKUP_DIRPATH}"
+        echo "    "
+        ssh -i "$SSH_KEY_FILE" ${SSH_USER}@${TARGET_SERVER} "sudo zip -r ${BACKUP_DIRPATH}${ZIP_FILE} ${ZIPPED_DIR}" >&2
+        echo " >>>>>>>>>>>>>>>>>>>> ZIP PRODUCTION ENDED"
+        echo "      "
+        echo " >>>> Copying Web Site Directory as Backup to: ${BACKUP_DIRPATH}"
+        echo "    "
+        ssh -i "$SSH_KEY_FILE" ${SSH_USER}@${TARGET_SERVER} "sudo cp -R ${ZIPPED_DIR} ${BACKUP_DIRPATH}" >&2
+        echo " >>>>>>>>>>>>>>>>>>>> WEB SITE'S PRODUCTION DIRECTORY BACKED-UP"
+        echo "      "
+    }
+    #=== FUNCTION ==================================================================
+    #        NAME: export_to_production
+    # DESCRIPTION: Synchronization of devel master branch with production by exporting
+    #              the master branch to production site.
+    #
+    #              Uses rsync over ssh with a key set up to be accepted on target machine.
+    #
+    #              If exporting locally you can use> GIT_WORK_TREE=/path/htdocs git checkout -f
+    #
+    #              Note: rsync deletes any file or directory on the target machine that does not exist on source machine: ANY!
+    #                    Be sure to exclude from deletion on target machine with "--exclude='here_files_and_directories'"
+    #                    This is hugely important if target machine directory has files uploaded by users, etc, that need to be kept!
+    #
+    #  PARAMETERS: ---
+    #===============================================================================
+    function export_to_production {
+        echo "      "
+        echo ">>>> SYNCHRONIZATION STARTED => EXPORTING MASTER BRANCH TO PRODUCTION SITE"
+        set -x # Turn ON command logging on shell
+               # Note: in rsync below use -P option if you want the progress of the synching
+        eval rsync -azh --delete --exclude={$GIT_EXCLUDES} --rsh=\"ssh -i ${SSH_KEY_FILE}\" $SYNC_SOURCE_DIR $SSH_USER@$TARGET_SERVER:$SYNC_TARGET_DIR >&2
+        set +x # Turn OFF command logging on shell
+        echo " >>>>>>>>>>>>>>>>>>>> SYNCHRONIZATION ENDED"
+        echo "      "
+    }
+    #=== FUNCTION ==================================================================
+    #        NAME: set_permissions
+    # DESCRIPTION: SET PERMISSIONS FOR WEB SERVER (apache) ON PUBLIC TARGET FOLDER @ PRODUCTION MACHINE
+    #  PARAMETERS: ---
+    #===============================================================================
+    function set_permissions {
+        echo "      "
+        echo ">>>> SET PERMISSIONS FOR WEB SERVER (apache) ON PUBLIC TARGET FOLDER @ PRODUCTION MACHINE"
+        ssh -i "$SSH_KEY_FILE" $SSH_USER@${TARGET_SERVER} "sudo chown -R apache:apache $SYNC_TARGET_DIR"
+        # ssh -i "$SSH_KEY_FILE" $SSH_USER@${TARGET_SERVER} "sudo chmod -R 775 $SYNC_TARGET_DIR"
+        echo "      "
+    }
+    #=== FUNCTION ==================================================================
+    #        NAME: run_deployment_tasks
+    # DESCRIPTION: Run any needed task such as Puppet, Restart Daemons, etc
+    #  PARAMETERS: ---
+    #===============================================================================
+    function run_deployment_tasks {
+        
+    }
